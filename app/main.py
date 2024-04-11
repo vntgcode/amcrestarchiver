@@ -70,6 +70,7 @@ def downloader(datafile, mediatype):
 def on_connect(client, userdata, flags, rc, properties):
     if rc == 0:
         logger.info("Connected to MQTT Broker!")
+        mqttclient.subscribe(mqtt_src)
     else:
         logger.error(f"Failed to connect, {rc}\n")
 
@@ -117,7 +118,6 @@ mqttclient.on_disconnect = on_disconnect
 mqttclient.on_message = on_message
 mqttclient._clean_session = True
 mqttclient.connect(mqtt_host, int(mqtt_port))
-mqttclient.subscribe(mqtt_src)
 mqttclient.loop_start()
 
 try:
