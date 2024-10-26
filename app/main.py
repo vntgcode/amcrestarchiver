@@ -41,16 +41,21 @@ def create_dir(path):
 
 def downloader(datafile, mediatype):
     
-    parts = re.match("/mnt/sd/([0-9]*)-([0-9]*)-([0-9]*)/[0-9]*/dav/([0-9]*)/(.*)", datafile)
+    parts = re.match("/mnt/sd/([0-9]*)-([0-9]*)-([0-9]*)/[0-9]*/(dav|jpg)/([0-9]*)/(.*)", datafile)
 
     if parts:
         year = parts[1]
         month = parts[2]
         day = parts[3]
-        hour = parts[4]
-        filename = parts[5]
+        ftype = parts[4]
+        hour = parts[5]
+        filename = parts[6]
 
-        path = os.path.join(base_path, f'{year}/{month}/{day}/{hour}')
+
+        path = os.path.join(base_path, f'{year}/{month}/{day}/{hour}/{ftype}')
+
+        # remove slash from jpg image names
+        filename = filename.replace('/','')
 
         logger.info(f"http://{cam_host}/cgi-bin/RPC_Loadfile{datafile}")
 
