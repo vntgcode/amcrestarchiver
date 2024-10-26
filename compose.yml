@@ -1,0 +1,20 @@
+---
+services:
+  amcrestarchiver:
+    image: ghcr.io/vntgcode/amcrestarchiver:latest 
+    container_name: amcrestarchiver
+    environment:
+      - TZ=Etc/UTC
+      - MQTT_HOST=127.0.0.1
+      - MQTT_USER=amarchiver
+      - MQTT_PASS=*****
+      - MQTT_PORT=1883
+      - MQTT_SRC=amcrest/doorbell
+      - BASE_PATH=/camera
+      - CAM_USER=admin
+      - CAM_PASS=*****
+      - CAM_HOST=192.168.1.2
+      - LOG_LEVEL=DEBUG
+    restart: unless-stopped
+    volumes:
+      - /camera:/camera
