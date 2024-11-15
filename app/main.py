@@ -1,134 +1,193 @@
-from paho.mqtt import client as mqtt_client
+""" Python script to download images/vidoes from amcrest camera """
+
+import os
 import json
+import re
 import logging
 import time
+import uuid
+import paho.mqtt.client as mqtt
 import requests
-import os
 from requests.auth import HTTPDigestAuth
-import re
 
-# Logging
-logformat = "%(asctime)s  %(name)s  %(levelname)s: %(message)s"
-loglevel = os.getenv("LOG_LEVEL", default="INFO")
-logging.basicConfig(level=loglevel, format=logformat)
-logger = logging.getLogger(__name__)
-
-
-# environment variables
-mqtt_host = os.getenv("MQTT_HOST", "127.0.0.1")
-mqtt_port = os.getenv("MQTT_PORT", "1883")
-mqtt_user = os.getenv("MQTT_USER")
-mqtt_pass = os.getenv("MQTT_PASS")
-mqtt_src = os.getenv("MQTT_SRC", "test")
-cam_user = os.getenv("CAM_USER")
-cam_pass = os.getenv("CAM_PASS")
-cam_host = os.getenv("CAM_HOST")
-base_path = os.getenv("BASE_PATH", "/tmp")
-logger.info(os.getenv("MQTT_SRC"))
+# Logging setup
+LOGFORMAT = "%(asctime)s  %(name)s  %(levelname)s: %(message)s"
+loglevel = os.getenv("LOG_LEVEL", "INFO")
+logging.basicConfig(level=loglevel, format=LOGFORMAT)
+logger = logging.getLogger("amarchiver")
 
 
-def create_dir(path):
-    if os.path.exists(path):
-        return True
-    else:
+class Config:
+    """Configuration class for environment variables"""
+
+    def __init__(self):
+        self.mqtt_host = os.getenv("MQTT_HOST", "127.0.0.1")
+        self.mqtt_port = os.getenv("MQTT_PORT", "1883")
+        self.mqtt_user = os.getenv("MQTT_USER")
+        self.mqtt_pass = os.getenv("MQTT_PASS")
+        self.mqtt_src = os.getenv("MQTT_SRC", "test")
+        self.cam_user = os.getenv("CAM_USER")
+        self.cam_pass = os.getenv("CAM_PASS")
+        self.cam_host = os.getenv("CAM_HOST")
+        self.base_path = os.getenv("BASE_PATH", "/tmp")
+        self.client_id = os.getenv("CLIENT_ID")
+
+
+class CameraFileProcessor:
+    """Handles the processing of camera files and MQTT interaction"""
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def create_dir(self, path: str) -> None:
+        """Create directory if it doesn't exist"""
         try:
-            os.makedirs(path)
-            return True
-        except:
-            logger.warning(f'Failed to create path {path}')
-            return False
-        
+            os.makedirs(path, exist_ok=True)  # 'exist_ok=True' avoids race conditions
+        except OSError as e:
+            logger.error("Failed to create path %s: %s", path, e)
+            raise  # Rethrow exception to allow higher-level handling
 
-def downloader(datafile, mediatype):
-    
-    parts = re.match("/mnt/sd/([0-9]*)-([0-9]*)-([0-9]*)/[0-9]*/(dav|jpg)/([0-9]*)/(.*)", datafile)
+    def get_file_name(self, file_path: str) -> str:
+        """Extract filename from full file path"""
+        return os.path.basename(file_path)
 
-    if parts:
-        year = parts[1]
-        month = parts[2]
-        day = parts[3]
-        ftype = parts[4]
-        hour = parts[5]
-        filename = parts[6]
+    def get_parts(self, file: str) -> dict:
+        """Break down payload file into date, time, file type and name"""
+        match = re.match(
+            r"/mnt/sd/([0-9]+)-([0-9]+)-([0-9]+)/[0-9]+/(dav|jpg)/([0-9]+)/(.+)", file
+        )
+        if match:
+            return {
+                "year": match.group(1),
+                "month": match.group(2),
+                "day": match.group(3),
+                "ext": match.group(4),
+                "file_id": match.group(5),
+                "filename": match.group(6),
+            }
+        return {}
 
+    def get_path(self, parts: dict) -> str:
+        """Create file destination path"""
+        filename = parts["filename"].replace("/", "")  # sanitize filename
+        path = os.path.join(
+            parts["year"], parts["month"], parts["day"], parts["file_id"], parts["ext"]
+        )
+        return path, filename
 
-        path = os.path.join(base_path, f'{year}/{month}/{day}/{hour}/{ftype}')
+    def get_file(self, file: str) -> bytes:
+        """Download file from the camera"""
+        url = f"http://{self.config.cam_host}/cgi-bin/RPC_Loadfile{file}"
+        try:
+            logger.info("Downloading file %s", url)
+            req = requests.get(
+                url,
+                auth=HTTPDigestAuth(self.config.cam_user, self.config.cam_pass),
+                timeout=10,
+            )
+            req.raise_for_status()  # Will raise an exception for HTTP errors
+            return req.content
+        except requests.exceptions.RequestException as e:
+            logger.error("Failed to download file %s: %s", file, e)
+            raise
 
-        # remove slash from jpg image names
-        filename = filename.replace('/','')
+    def save_file(self, file_bytes: bytes, path: str) -> None:
+        """Save file content to the specified path"""
+        try:
+            with open(path, "wb") as localfile:
+                localfile.write(file_bytes)
+        except OSError as e:
+            logger.error("Failed to save file %s: %s", path, e)
+            raise
 
-        logger.info(f"http://{cam_host}/cgi-bin/RPC_Loadfile{datafile}")
+    def parse_msg(self, msg: str) -> dict:
+        """Parse MQTT message payload, error on invalid json"""
+        try:
+            return json.loads(msg.payload.decode())
+        except json.JSONDecodeError:
+            logger.error("Failed to parse message: %s", msg.payload)
+            return {}
 
-        if create_dir(path):
-            try:
-                req = requests.get(
-                    f"http://{cam_host}/cgi-bin/RPC_Loadfile{datafile}",
-                    auth=HTTPDigestAuth(cam_user, cam_pass),
-                )
+    def process_msg(self, payload: dict) -> None:
+        """Process the message payload, download and save file"""
+        file = payload["event_data"]["payload"]["data"]["File"]
+        parts = self.get_parts(file)
 
-                with open(os.path.join(path,filename), "wb") as localfile:
-                    localfile.write(req.content)
-            except Exception as e:
-                logger.warning(e)
-                return
+        if not parts:
+            logger.error("Invalid file path: %s", file)
+            return
 
-def on_connect(client, userdata, flags, rc, properties):
-    if rc == 0:
-        logger.info("Connected to MQTT Broker!")
-        mqttclient.subscribe(mqtt_src)
-    else:
-        logger.error(f"Failed to connect, {rc}\n")
+        os_path, file_name = self.get_path(parts)
+        self.create_dir(os_path)
 
+        try:
+            file_bytes = self.get_file(file)
+            file_path = os.path.join(os_path, file_name)
+            self.save_file(file_bytes, file_path)
+        except OSError as e:
+            logger.error("Error processing file %s: %s", file, e)
 
-def on_disconnect(client, userdata, flags, rc, properties):
-    logger.info("Disconnected to MQTT Broker!")
+    def on_connect(self, client, _userdata, _flags, rc, _properties):
+        """Callback when the MQTT client connects, log status message"""
+        if rc == 0:
+            logger.info("Connected to MQTT Broker!")
+            client.connected_flag = True
+            client.subscribe(self.config.mqtt_src)
+        else:
+            logger.error("Failed to connect with code %s", rc)
 
+    def on_disconnect(self, _client, _userdata, _flags, rc, _properties):
+        """Callback when the MQTT client disconnects"""
+        if rc == 0:
+            logger.info("Closing connection to MQTT Broker!")
+        else:
+            logger.warning(
+                "Disconnected error code %s, client should auto reconnect", rc
+            )
 
-def on_message(client, userdata, msg):
-    try:
-        payload = json.loads(msg.payload.decode())
+    def on_message(self, _client, _userdata, msg: str) -> None:
+        """Callback when an MQTT message is received, parse json message 
+                and filter for correct event types"""
+        payload = self.parse_msg(msg)
 
-        if "event_type" in payload:
-
-            if (
-                payload["event_type"] == "amcrest"
-                and "camera" in payload["event_data"]
-                and payload["event_data"]["event"] == "NewFile"
-            ):
-
-                file = payload["event_data"]["payload"]["data"]["File"]
-
-                if "mp4" in file:
-                    mediatype = "video"
-                else:
-                    mediatype = "still"
-
-                downloader(file, mediatype)
+        if payload and payload.get("event_type") == "amcrest":
+            event_data = payload.get("event_data", {})
+            if event_data.get("event") == "NewFile" and "camera" in event_data:
+                self.process_msg(payload)
             else:
-                logging.info(payload)
-    except:
-        logger.info(f"failed to parse message {msg.payload}")
-        return
+                logger.info("Unhandled event: %s", payload)
 
 
-# Set Connecting Client ID
-mqttclient = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+def main():
+    """Main function to start the MQTT client and process messages"""
+    config = Config()
+    camera_processor = CameraFileProcessor(config)
 
-# Set user/pass if set
-if mqtt_user is not None and mqtt_pass is not None:
-    mqttclient.username_pw_set(mqtt_user, mqtt_pass)
+    if not config.client_id:
+        config.client_id = str(uuid.uuid4())
 
-mqttclient.on_connect = on_connect
-mqttclient.on_disconnect = on_disconnect
-mqttclient.on_message = on_message
-mqttclient._clean_session = True
-mqttclient.connect(mqtt_host, int(mqtt_port))
-mqttclient.loop_start()
+    mqtt_client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=config.client_id,
+    )
+    if config.mqtt_user and config.mqtt_pass:
+        mqtt_client.username_pw_set(config.mqtt_user, config.mqtt_pass)
 
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    logger.info("Received interrupt, shutting down")
-    mqttclient.disconnect()
-    mqttclient.loop_stop()
+    mqtt_client.on_connect = camera_processor.on_connect
+    mqtt_client.on_disconnect = camera_processor.on_disconnect
+    mqtt_client.on_message = camera_processor.on_message
+    mqtt_client.connect(config.mqtt_host, int(config.mqtt_port))
+    mqtt_client.subscribe(config.mqtt_src)
+    mqtt_client.loop_start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down due to keyboard interrupt")
+        mqtt_client.disconnect()
+        mqtt_client.loop_stop()
+
+
+if __name__ == "__main__":
+    main()
