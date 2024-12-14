@@ -70,7 +70,7 @@ class CameraFileProcessor:
     def get_path(self, parts: dict) -> str:
         """Create file destination path"""
         filename = parts["filename"].replace("/", "")  # sanitize filename
-        path = os.path.join(
+        path = os.path.join(self.base_path,
             parts["year"], parts["month"], parts["day"], parts["file_id"], parts["ext"]
         )
         return path, filename
